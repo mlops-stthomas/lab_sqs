@@ -1,33 +1,44 @@
 import json
 import time
-import uuid
 import boto3
-import argparse
+from handler import handle_message
 import settings
 
 sqs = boto3.client("sqs")
 
-def generate_custom_message(msg):
-    return {
-        "message": str(msg)
-    }
-    
-def generate_invalid_message(msg):
-    return "This is not json"
 
+def poll():
+    while True:
+        try:
+            response = sqs.receive_message(
+                QueueUrl=settings.QUEUE_URL,
+                MaxNumberOfMessages=settings.MAX_MESSAGES,
+                VisibilityTimeout=settings.VISIBILITY_TIMEOUT,
+                WaitTimeSeconds=settings.WAIT_TIME,
+            )
 
-def run_writer(queue_url, msg):
-    message = generate_custom_message(msg)
-    sqs.send_message(
-        QueueUrl=queue_url,
-        MessageBody=json.dumps(message)
-    )
+            messages = response.get("Messages", [])
+            if not messages:
+                continue
 
-    print(f"Sent msg", msg)
+            for msg in messages:
+                receipt_handle = msg["ReceiptHandle"]
+
+                try:
+                    body = json.loads(msg["Body"])
+                    handle_message(body)
+
+                    sqs.delete_message(
+                        QueueUrl=settings.QUEUE_URL, ReceiptHandle=receipt_handle
+                    )
+
+                except Exception as e:
+                    print(f"Error processing message: {e}")
+
+        except Exception as e:
+            print("Fatal poll error:", e)
+            time.sleep(5)  # backoff before retrying
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--msg", type=str, default="MLOPS Rocks")
-    args = parser.parse_args()
-
-    run_writer(settings.QUEUE_URL, args.msg)
+    poll()
