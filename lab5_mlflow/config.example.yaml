@@ -1,0 +1,21 @@
+neo4j:
+  uri: "bolt://localhost:7687"
+  user: "neo4j"
+  password_env: "NEO4J_PASSWORD"
+  database: "toast_analytics"
+
+openai:
+  api_key_env: "OPENAI_API_KEY"
+  model: "gpt-4o-mini"
+
+gepa:
+  budget: 50
+  minibatch_size: 2
+  pareto_val_size: 20
+  merge_frequency: 5
+  max_candidates: 10
+
+pipeline:
+  batch_size: 100
+  parallel_workers: 4
+  timeout_seconds: 30

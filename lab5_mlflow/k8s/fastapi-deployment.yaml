@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dataops-fastapi
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: dataops-fastapi
+  template:
+    metadata:
+      labels:
+        app: dataops-fastapi
+    spec:
+      containers:
+        - name: fastapi
+          image: your-registry/dataops-fastapi:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: dataops-secrets
+            - configMapRef:
+                name: dataops-config
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10

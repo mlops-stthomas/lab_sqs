@@ -1,0 +1,15 @@
+[project]
+name = "lab-sqs"
+version = "0.1.0"
+description = "SQS lab utilities and message pipeline experiments"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "boto3",
+  "python-dotenv",
+]
+
+[tool.uv.workspace]
+members = [
+  "lab5_mlflow",
+]

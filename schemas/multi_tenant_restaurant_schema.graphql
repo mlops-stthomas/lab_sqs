@@ -1,0 +1,682 @@
+# Multi-Tenant Restaurant Intelligence GraphQL Schema
+# Implements row-level security with JWT-based authorization
+
+directive @authentication(
+  operations: [AuthOperation] = [CREATE, READ, UPDATE, DELETE, CREATE_RELATIONSHIP, DELETE_RELATIONSHIP]
+  jwt: JWTFilter
+) on OBJECT | FIELD_DEFINITION | SCHEMA
+
+directive @authorization(
+  validate: [AuthorizationRule!]
+  filter: [AuthorizationFilter!]
+) on OBJECT | FIELD_DEFINITION
+
+enum AuthOperation {
+  CREATE
+  READ
+  AGGREGATE
+  UPDATE
+  DELETE
+  CREATE_RELATIONSHIP
+  DELETE_RELATIONSHIP
+  SUBSCRIBE
+}
+
+input JWTFilter {
+  roles_INCLUDES: String
+  tenantId_IN: [String!]
+  locationAccess_INCLUDES: String
+}
+
+# Restaurant entity with tenant-based access control
+type Restaurant @node {
+  id: ID! @id
+  restaurantId: String! @unique
+  name: String!
+  city: String
+  state: String
+  tenantAccess: [String!]!  # List of tenant IDs with access
+
+  alerts: [Alert!]! @relationship(type: "HAS_ALERT", direction: OUT)
+  performanceMetrics: [PerformanceMetric!]! @relationship(type: "TRACKS_METRIC", direction: OUT)
+  operationalAlerts: [OperationalAlert!]! @relationship(type: "HAS_OPERATIONAL_ALERT", direction: OUT)
+}
+
+# Performance metrics for restaurants
+type PerformanceMetric @node {
+  id: ID! @id
+  metricType: String!
+  value: Float!
+  timestamp: DateTime!
+
+  restaurant: Restaurant! @relationship(type: "TRACKS_METRIC", direction: IN)
+}
+
+# Alert entity with tenant-scoped access
+type Alert @node
+  @authentication(operations: [READ, UPDATE])
+  @authorization(
+    filter: [
+      { where: { node: { restaurant: { tenantAccess_INCLUDES: "$jwt.tenantId" } } } }
+    ]
+  ) {
+  id: ID! @id
+  alertId: String! @unique
+  alertType: String!
+  severity: Severity!
+  metric: String!
+  currentValue: Float!
+  threshold: Float!
+  deviation: Float!
+  message: String!
+  timestamp: DateTime!
+  acknowledged: Boolean @default(value: false)
+  acknowledgedBy: String
+  acknowledgedAt: DateTime
+
+  restaurant: Restaurant! @relationship(type: "HAS_ALERT", direction: IN)
+  tenant: Tenant @relationship(type: "OWNS_ALERT", direction: IN)
+}
+
+# Operational alerts with multi-tenant authorization
+type OperationalAlert @node
+  @authentication
+  @authorization(
+    filter: [
+      {
+        requireAuthentication: true,
+        where: {
+          OR: [
+            { node: { tenant: { tenantId: "$jwt.tenantId" } } },
+            { node: { restaurant: { tenantAccess_INCLUDES: "$jwt.tenantId" } } }
+          ]
+        }
+      }
+    ]
+  ) {
+  id: ID! @id
+  alertId: String! @unique
+  alertTable: String!
+  alertType: String!
+  severity: Severity!
+  metric: String!
+  currentValue: Float
+  threshold: Float
+  deviation: Float
+  message: String!
+  timestamp: DateTime!
+  metadata: JSON
+  acknowledged: Boolean @default(value: false)
+
+  restaurant: Restaurant! @relationship(type: "HAS_OPERATIONAL_ALERT", direction: IN)
+  tenant: Tenant @relationship(type: "OWNS_OPERATIONAL_ALERT", direction: IN)
+}
+
+# Tenant entity with subscription-based access
+type Tenant @node
+  @authentication(operations: [CREATE, UPDATE, DELETE], jwt: { roles_INCLUDES: "admin" }) {
+  id: ID! @id
+  tenantId: String! @unique
+  name: String!
+  subscriptionTier: SubscriptionTier!
+  subscribedLocations: [String!]!
+  alertPreferences: AlertPreferences
+
+  restaurants: [Restaurant!]! @relationship(type: "SUBSCRIBES_TO", direction: OUT)
+  alerts: [Alert!]! @relationship(type: "OWNS_ALERT", direction: OUT)
+  operationalAlerts: [OperationalAlert!]! @relationship(type: "OWNS_OPERATIONAL_ALERT", direction: OUT)
+  users: [User!]! @relationship(type: "BELONGS_TO", direction: IN)
+}
+
+# User entity
+type User @node @authentication {
+  id: ID! @id
+  userId: String! @unique
+  email: String!
+  name: String
+  roles: [String!]!
+  lastLogin: DateTime
+
+  tenant: Tenant! @relationship(type: "BELONGS_TO", direction: OUT)
+}
+
+# Alert preferences configuration
+type AlertPreferences {
+  emailEnabled: Boolean!
+  webhookUrl: String
+  alertTypes: [String!]!
+  severityThreshold: Severity!
+  notificationChannels: [NotificationChannel!]!
+}
+
+type NotificationChannel {
+  type: String!
+  config: JSON!
+  enabled: Boolean!
+}
+
+enum Severity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum SubscriptionTier {
+  BASIC
+  PRO
+  ENTERPRISE
+}
+
+# Location analytics response type
+type LocationAnalytics {
+  restaurantId: String!
+  restaurantName: String!
+  city: String!
+  state: String!
+  totalAlerts: Int!
+  criticalAlerts: Int!
+  averageRevenue: Float!
+  performanceScore: Float!
+  alertTrends: [AlertTrend!]!
+}
+
+type AlertTrend {
+  date: DateTime!
+  count: Int!
+  severity: Severity!
+}
+
+# Extended Query type with custom Cypher resolvers
+extend type Query {
+  # Get alerts for authenticated tenant
+  myAlerts(
+    severity: Severity
+    startDate: DateTime
+    endDate: DateTime
+    acknowledged: Boolean
+    limit: Int = 100
+    offset: Int = 0
+  ): [Alert!]!
+    @authentication
+    @cypher(
+      statement: """
+      MATCH (t:Tenant {tenantId: $auth.jwt.tenantId})-[:SUBSCRIBES_TO]->(r:Restaurant)-[:HAS_ALERT]->(a:Alert)
+      WHERE ($severity IS NULL OR a.severity = $severity)
+        AND ($startDate IS NULL OR a.timestamp >= $startDate)
+        AND ($endDate IS NULL OR a.timestamp <= $endDate)
+        AND ($acknowledged IS NULL OR a.acknowledged = $acknowledged)
+      RETURN a
+      ORDER BY a.timestamp DESC
+      SKIP $offset
+      LIMIT $limit
+      """
+    )
+
+  # Get operational alerts with filtering
+  operationalAlerts(
+    alertTable: String
+    severity: Severity
+    restaurantId: String
+    limit: Int = 100
+  ): [OperationalAlert!]!
+    @authentication
+    @cypher(
+      statement: """
+      MATCH (t:Tenant {tenantId: $auth.jwt.tenantId})-[:SUBSCRIBES_TO]->(r:Restaurant)-[:HAS_OPERATIONAL_ALERT]->(oa:OperationalAlert)
+      WHERE ($alertTable IS NULL OR oa.alertTable = $alertTable)
+        AND ($severity IS NULL OR oa.severity = $severity)
+        AND ($restaurantId IS NULL OR r.restaurantId = $restaurantId)
+      RETURN oa
+      ORDER BY oa.timestamp DESC
+      LIMIT $limit
+      """
+    )
+
+  # Location-based analytics
+  locationAnalytics(
+    startDate: DateTime!
+    endDate: DateTime!
+  ): [LocationAnalytics!]!
+    @authentication
+    @cypher(
+      statement: """
+      MATCH (t:Tenant {tenantId: $auth.jwt.tenantId})-[:SUBSCRIBES_TO]->(r:Restaurant)
+      OPTIONAL MATCH (r)-[:HAS_ALERT]->(a:Alert)
+      WHERE a.timestamp >= $startDate AND a.timestamp <= $endDate
+      WITH r, COLLECT(a) as alerts
+      OPTIONAL MATCH (r)-[:TRACKS_METRIC]->(m:PerformanceMetric {metricType: 'revenue'})
+      WHERE m.timestamp >= $startDate AND m.timestamp <= $endDate
+      WITH r, alerts, AVG(m.value) as avgRevenue
+      RETURN {
+        restaurantId: r.restaurantId,
+        restaurantName: r.name,
+        city: r.city,
+        state: r.state,
+        totalAlerts: SIZE(alerts),
+        criticalAlerts: SIZE([a IN alerts WHERE a.severity = 'CRITICAL']),
+        averageRevenue: avgRevenue,
+        performanceScore: 100 - (SIZE(alerts) * 2),
+        alertTrends: [a IN alerts | {date: a.timestamp, count: 1, severity: a.severity}]
+      } as result
+      """
+      columnName: "result"
+    )
+
+  # Check user permissions
+  myPermissions: JSON!
+    @authentication
+    @cypher(
+      statement: """
+      MATCH (u:User {userId: $auth.jwt.sub})-[:BELONGS_TO]->(t:Tenant)
+      RETURN {
+        tenantId: t.tenantId,
+        tenantName: t.name,
+        subscriptionTier: t.subscriptionTier,
+        roles: u.roles,
+        subscribedLocations: t.subscribedLocations
+      } as permissions
+      """
+      columnName: "permissions"
+    )
+
+  # Get restaurant performance dashboard
+  restaurantDashboard(restaurantId: String!, startDate: DateTime, endDate: DateTime): JSON!
+    @authentication
+    @cypher(
+      statement: """
+      MATCH (t:Tenant {tenantId: $auth.jwt.tenantId})-[:SUBSCRIBES_TO]->(r:Restaurant {restaurantId: $restaurantId})
+
+      // Get alert statistics
+      OPTIONAL MATCH (r)-[:HAS_ALERT]->(alert:Alert)
+      WHERE ($startDate IS NULL OR alert.timestamp >= $startDate)
+        AND ($endDate IS NULL OR alert.timestamp <= $endDate)
+      WITH r,
+           COLLECT(alert) as alerts,
+           SIZE([a IN COLLECT(alert) WHERE a.severity = 'CRITICAL']) as criticalCount,
+           SIZE([a IN COLLECT(alert) WHERE a.acknowledged = false]) as unacknowledgedCount
+
+      // Get performance metrics
+      OPTIONAL MATCH (r)-[:TRACKS_METRIC]->(metric:PerformanceMetric)
+      WHERE ($startDate IS NULL OR metric.timestamp >= $startDate)
+        AND ($endDate IS NULL OR metric.timestamp <= $endDate)
+      WITH r, alerts, criticalCount, unacknowledgedCount,
+           COLLECT({type: metric.metricType, value: metric.value, timestamp: metric.timestamp}) as metrics
+
+      // Get operational alerts
+      OPTIONAL MATCH (r)-[:HAS_OPERATIONAL_ALERT]->(opAlert:OperationalAlert)
+      WHERE ($startDate IS NULL OR opAlert.timestamp >= $startDate)
+        AND ($endDate IS NULL OR opAlert.timestamp <= $endDate)
+
+      RETURN {
+        restaurant: {
+          id: r.restaurantId,
+          name: r.name,
+          city: r.city,
+          state: r.state
+        },
+        alertStats: {
+          total: SIZE(alerts),
+          critical: criticalCount,
+          unacknowledged: unacknowledgedCount,
+          byType: [type IN ['revenue_drop', 'quality_issue', 'compliance'] |
+            {type: type, count: SIZE([a IN alerts WHERE a.alertType = type])}
+          ]
+        },
+        performanceMetrics: metrics,
+        operationalAlertCount: COUNT(opAlert),
+        healthScore: 100 - (criticalCount * 10) - (unacknowledgedCount * 5)
+      } as dashboard
+      """
+      columnName: "dashboard"
+    )
+
+  # Get alert trends with time-based aggregation
+  alertTrends(
+    startDate: DateTime!
+    endDate: DateTime!
+    groupBy: String = "day"
+    restaurantId: String
+  ): [JSON!]!
+    @authentication
+    @cypher(
+      statement: """
+      MATCH (t:Tenant {tenantId: $auth.jwt.tenantId})-[:SUBSCRIBES_TO]->(r:Restaurant)
+      WHERE ($restaurantId IS NULL OR r.restaurantId = $restaurantId)
+      MATCH (r)-[:HAS_ALERT]->(a:Alert)
+      WHERE a.timestamp >= $startDate AND a.timestamp <= $endDate
+
+      WITH a, r,
+        CASE $groupBy
+          WHEN 'hour' THEN datetime({year: a.timestamp.year, month: a.timestamp.month, day: a.timestamp.day, hour: a.timestamp.hour})
+          WHEN 'day' THEN date(a.timestamp)
+          WHEN 'week' THEN date(a.timestamp) - duration({days: a.timestamp.dayOfWeek})
+          WHEN 'month' THEN date({year: a.timestamp.year, month: a.timestamp.month, day: 1})
+          ELSE date(a.timestamp)
+        END as period
+
+      WITH period,
+           COUNT(a) as totalAlerts,
+           SIZE([alert IN COLLECT(a) WHERE alert.severity = 'CRITICAL']) as criticalAlerts,
+           SIZE([alert IN COLLECT(a) WHERE alert.severity = 'HIGH']) as highAlerts,
+           SIZE([alert IN COLLECT(a) WHERE alert.severity = 'MEDIUM']) as mediumAlerts,
+           SIZE([alert IN COLLECT(a) WHERE alert.severity = 'LOW']) as lowAlerts,
+           COLLECT(DISTINCT r.restaurantId) as affectedRestaurants
+
+      RETURN {
+        period: toString(period),
+        totalAlerts: totalAlerts,
+        critical: criticalAlerts,
+        high: highAlerts,
+        medium: mediumAlerts,
+        low: lowAlerts,
+        affectedRestaurantCount: SIZE(affectedRestaurants)
+      } as trend
+      ORDER BY period ASC
+      """
+      columnName: "trend"
+    )
+
+  # Get restaurants ranked by performance
+  restaurantRankings(
+    startDate: DateTime!
+    endDate: DateTime!
+    metricType: String = "revenue"
+    limit: Int = 10
+  ): [JSON!]!
+    @authentication
+    @cypher(
+      statement: """
+      MATCH (t:Tenant {tenantId: $auth.jwt.tenantId})-[:SUBSCRIBES_TO]->(r:Restaurant)
+
+      // Get metric values
+      OPTIONAL MATCH (r)-[:TRACKS_METRIC]->(m:PerformanceMetric {metricType: $metricType})
+      WHERE m.timestamp >= $startDate AND m.timestamp <= $endDate
+      WITH r, AVG(m.value) as avgMetric, COUNT(m) as metricCount
+
+      // Get alert impact
+      OPTIONAL MATCH (r)-[:HAS_ALERT]->(a:Alert)
+      WHERE a.timestamp >= $startDate AND a.timestamp <= $endDate
+      WITH r, avgMetric, metricCount,
+           SIZE([alert IN COLLECT(a) WHERE alert.severity = 'CRITICAL']) as criticalAlerts,
+           SIZE(COLLECT(a)) as totalAlerts
+
+      // Calculate performance score
+      WITH r, avgMetric, metricCount, criticalAlerts, totalAlerts,
+           CASE
+             WHEN metricCount = 0 THEN 0
+             ELSE avgMetric - (criticalAlerts * avgMetric * 0.1) - (totalAlerts * avgMetric * 0.02)
+           END as performanceScore
+
+      RETURN {
+        restaurantId: r.restaurantId,
+        restaurantName: r.name,
+        city: r.city,
+        state: r.state,
+        averageMetricValue: avgMetric,
+        criticalAlerts: criticalAlerts,
+        totalAlerts: totalAlerts,
+        performanceScore: performanceScore,
+        rank: null
+      } as ranking
+      ORDER BY performanceScore DESC
+      LIMIT $limit
+      """
+      columnName: "ranking"
+    )
+
+  # Get critical alerts requiring immediate attention
+  criticalAlertsSummary(limit: Int = 50): [JSON!]!
+    @authentication
+    @cypher(
+      statement: """
+      MATCH (t:Tenant {tenantId: $auth.jwt.tenantId})-[:SUBSCRIBES_TO]->(r:Restaurant)-[:HAS_ALERT]->(a:Alert)
+      WHERE a.severity = 'CRITICAL' AND a.acknowledged = false
+
+      WITH a, r, duration.between(a.timestamp, datetime()) as age
+
+      RETURN {
+        alertId: a.alertId,
+        alertType: a.alertType,
+        message: a.message,
+        restaurant: {
+          id: r.restaurantId,
+          name: r.name,
+          city: r.city,
+          state: r.state
+        },
+        metric: a.metric,
+        currentValue: a.currentValue,
+        threshold: a.threshold,
+        deviation: a.deviation,
+        timestamp: toString(a.timestamp),
+        ageInHours: duration.inHours(age).hours,
+        urgencyScore: 100 * (a.deviation / a.threshold) * (1 + duration.inHours(age).hours / 24.0)
+      } as criticalAlert
+      ORDER BY urgencyScore DESC
+      LIMIT $limit
+      """
+      columnName: "criticalAlert"
+    )
+
+  # Compare multiple restaurants
+  compareRestaurants(
+    restaurantIds: [String!]!
+    startDate: DateTime!
+    endDate: DateTime!
+  ): [JSON!]!
+    @authentication
+    @cypher(
+      statement: """
+      MATCH (t:Tenant {tenantId: $auth.jwt.tenantId})-[:SUBSCRIBES_TO]->(r:Restaurant)
+      WHERE r.restaurantId IN $restaurantIds
+
+      // Get performance metrics
+      OPTIONAL MATCH (r)-[:TRACKS_METRIC]->(m:PerformanceMetric)
+      WHERE m.timestamp >= $startDate AND m.timestamp <= $endDate
+      WITH r,
+           COLLECT({type: m.metricType, value: m.value}) as metrics,
+           [type IN ['revenue', 'orders', 'avg_check'] |
+             {metricType: type, average: AVG([metric IN COLLECT(m) WHERE metric.metricType = type | metric.value])}
+           ] as avgMetrics
+
+      // Get alert counts
+      OPTIONAL MATCH (r)-[:HAS_ALERT]->(a:Alert)
+      WHERE a.timestamp >= $startDate AND a.timestamp <= $endDate
+
+      WITH r, avgMetrics,
+           COUNT(a) as totalAlerts,
+           SIZE([alert IN COLLECT(a) WHERE alert.severity = 'CRITICAL']) as criticalAlerts
+
+      RETURN {
+        restaurantId: r.restaurantId,
+        restaurantName: r.name,
+        location: r.city + ', ' + r.state,
+        averageMetrics: avgMetrics,
+        alertStats: {
+          total: totalAlerts,
+          critical: criticalAlerts
+        },
+        performanceScore: 100 - (criticalAlerts * 10) - (totalAlerts * 2)
+      } as comparison
+      ORDER BY performanceScore DESC
+      """
+      columnName: "comparison"
+    )
+
+  # Get alert resolution metrics
+  alertResolutionMetrics(
+    startDate: DateTime!
+    endDate: DateTime!
+  ): JSON!
+    @authentication
+    @cypher(
+      statement: """
+      MATCH (t:Tenant {tenantId: $auth.jwt.tenantId})-[:SUBSCRIBES_TO]->(r:Restaurant)-[:HAS_ALERT]->(a:Alert)
+      WHERE a.timestamp >= $startDate AND a.timestamp <= $endDate
+
+      WITH a,
+           CASE WHEN a.acknowledged THEN duration.between(a.timestamp, a.acknowledgedAt) ELSE null END as resolutionTime
+
+      WITH COLLECT(a) as allAlerts,
+           [alert IN COLLECT(a) WHERE alert.acknowledged | alert] as acknowledgedAlerts,
+           [time IN COLLECT(resolutionTime) WHERE time IS NOT NULL | time] as resolutionTimes
+
+      RETURN {
+        totalAlerts: SIZE(allAlerts),
+        acknowledgedCount: SIZE(acknowledgedAlerts),
+        unacknowledgedCount: SIZE(allAlerts) - SIZE(acknowledgedAlerts),
+        acknowledgementRate: CASE WHEN SIZE(allAlerts) > 0 THEN toFloat(SIZE(acknowledgedAlerts)) / SIZE(allAlerts) * 100 ELSE 0 END,
+        averageResolutionHours: CASE WHEN SIZE(resolutionTimes) > 0
+          THEN AVG([t IN resolutionTimes | duration.inHours(t).hours])
+          ELSE null END,
+        medianResolutionHours: CASE WHEN SIZE(resolutionTimes) > 0
+          THEN [t IN resolutionTimes | duration.inHours(t).hours][SIZE(resolutionTimes)/2]
+          ELSE null END,
+        fastestResolutionHours: CASE WHEN SIZE(resolutionTimes) > 0
+          THEN MIN([t IN resolutionTimes | duration.inHours(t).hours])
+          ELSE null END,
+        slowestResolutionHours: CASE WHEN SIZE(resolutionTimes) > 0
+          THEN MAX([t IN resolutionTimes | duration.inHours(t).hours])
+          ELSE null END
+      } as metrics
+      """
+      columnName: "metrics"
+    )
+
+  # Get revenue analytics with trends
+  revenueAnalytics(
+    restaurantId: String
+    startDate: DateTime!
+    endDate: DateTime!
+    groupBy: String = "day"
+  ): [JSON!]!
+    @authentication
+    @cypher(
+      statement: """
+      MATCH (t:Tenant {tenantId: $auth.jwt.tenantId})-[:SUBSCRIBES_TO]->(r:Restaurant)
+      WHERE ($restaurantId IS NULL OR r.restaurantId = $restaurantId)
+      MATCH (r)-[:TRACKS_METRIC]->(m:PerformanceMetric {metricType: 'revenue'})
+      WHERE m.timestamp >= $startDate AND m.timestamp <= $endDate
+
+      WITH r, m,
+        CASE $groupBy
+          WHEN 'hour' THEN datetime({year: m.timestamp.year, month: m.timestamp.month, day: m.timestamp.day, hour: m.timestamp.hour})
+          WHEN 'day' THEN date(m.timestamp)
+          WHEN 'week' THEN date(m.timestamp) - duration({days: m.timestamp.dayOfWeek})
+          WHEN 'month' THEN date({year: m.timestamp.year, month: m.timestamp.month, day: 1})
+          ELSE date(m.timestamp)
+        END as period
+
+      WITH r, period, COLLECT(m.value) as revenues
+
+      RETURN {
+        restaurantId: r.restaurantId,
+        restaurantName: r.name,
+        period: toString(period),
+        totalRevenue: SUM(revenues),
+        averageRevenue: AVG(revenues),
+        minRevenue: MIN(revenues),
+        maxRevenue: MAX(revenues),
+        transactionCount: SIZE(revenues),
+        revenueGrowth: CASE
+          WHEN SIZE(revenues) > 1
+          THEN ((revenues[-1] - revenues[0]) / revenues[0]) * 100
+          ELSE 0
+        END
+      } as analytics
+      ORDER BY period ASC
+      """
+      columnName: "analytics"
+    )
+}
+
+# Extended Mutation type
+extend type Mutation {
+  # Acknowledge an alert
+  acknowledgeAlert(alertId: String!): Alert
+    @authentication(jwt: { roles_INCLUDES: "manager" })
+    @cypher(
+      statement: """
+      MATCH (u:User {userId: $auth.jwt.sub})-[:BELONGS_TO]->(t:Tenant)-[:SUBSCRIBES_TO]->(r:Restaurant)-[:HAS_ALERT]->(a:Alert {alertId: $alertId})
+      SET a.acknowledged = true,
+          a.acknowledgedBy = u.email,
+          a.acknowledgedAt = datetime()
+      RETURN a
+      """
+    )
+
+  # Update alert preferences
+  updateAlertPreferences(preferences: AlertPreferencesInput!): Tenant
+    @authentication(jwt: { roles_INCLUDES: "admin" })
+    @cypher(
+      statement: """
+      MATCH (t:Tenant {tenantId: $auth.jwt.tenantId})
+      SET t.alertPreferences = $preferences
+      RETURN t
+      """
+    )
+
+  # Add user to tenant
+  addUserToTenant(email: String!, name: String!, roles: [String!]!): User
+    @authentication(jwt: { roles_INCLUDES: "admin" })
+    @cypher(
+      statement: """
+      MATCH (t:Tenant {tenantId: $auth.jwt.tenantId})
+      CREATE (u:User {
+        userId: randomUUID(),
+        email: $email,
+        name: $name,
+        roles: $roles,
+        createdAt: datetime()
+      })
+      CREATE (u)-[:BELONGS_TO]->(t)
+      RETURN u
+      """
+    )
+}
+
+# Subscriptions for real-time updates
+extend type Subscription @authentication {
+  # Real-time alert notifications
+  alertCreated(severity: Severity): Alert
+    @subscription(
+      events: [CREATED]
+      where: {
+        node: {
+          severity: $severity,
+          restaurant: { tenantAccess_INCLUDES: "$jwt.tenantId" }
+        }
+      }
+    )
+
+  # Operational alert updates
+  operationalAlertUpdated(alertTable: String): OperationalAlert
+    @subscription(
+      events: [CREATED, UPDATED]
+      where: {
+        node: {
+          alertTable: $alertTable,
+          tenant: { tenantId: "$jwt.tenantId" }
+        }
+      }
+    )
+}
+
+# Input types
+input AlertPreferencesInput {
+  emailEnabled: Boolean!
+  webhookUrl: String
+  alertTypes: [String!]!
+  severityThreshold: Severity!
+  notificationChannels: [NotificationChannelInput!]!
+}
+
+input NotificationChannelInput {
+  type: String!
+  config: JSON!
+  enabled: Boolean!
+}
+
+# Apply authentication to entire schema
+extend schema @authentication
