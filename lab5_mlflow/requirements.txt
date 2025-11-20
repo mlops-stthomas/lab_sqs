@@ -1,0 +1,28 @@
+# Core ML / tracking
+mlflow==3.4
+scikit-learn>=1.4,<2
+pandas>=2.2,<3
+numpy>=2,<3
+protobuf>=4,<6
+rich<14
+
+# API serving
+fastapi==0.115.0
+uvicorn[standard]==0.31.0
+python-multipart==0.0.9
+pydantic>=2.6,<3
+
+# Optional: for local testing / browser calls
+aiofiles>=23.0
+starlette>=0.38
+
+# Data sources
+snowflake-connector-python>=3.6,<4
+snowflake-sqlalchemy>=1.5,<2
+
+# Graph database
+neo4j>=5.14,<6
+py2neo>=2021.2
+
+# Environment management
+python-dotenv>=1.0,<2

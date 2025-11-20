@@ -1,0 +1,19 @@
+[
+  {
+    "toast_data": {
+      "order": {
+        "guid": "order-1",
+        "createdAt": "2025-11-19T12:00:00Z",
+        "selections": [
+          {"guid": "li-1", "name": "Burger", "orderGuid": "order-1"},
+          {"guid": "li-2", "name": "Fries", "orderGuid": "order-1"}
+        ],
+        "employee": {"guid": "emp-1", "name": "Alice"}
+      }
+    },
+    "expected_entities": ["Order", "ProperHotelToastOrderLineItem", "ProperHotelToastEmployee"],
+    "expected_relationships": [{"type": "IS_PART_OF_ORDER_HEADER"}],
+    "relationship_counts": {"IS_PART_OF_ORDER_HEADER": 2},
+    "fraud_patterns": []
+  }
+]

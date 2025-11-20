@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mlflow-server
+  template:
+    metadata:
+      labels:
+        app: mlflow-server
+    spec:
+      containers:
+        - name: mlflow
+          image: your-registry/mlflow:latest
+          ports:
+            - containerPort: 5000
+          envFrom:
+            - secretRef:
+                name: dataops-secrets
+            - configMapRef:
+                name: dataops-config
+          volumeMounts:
+            - name: mlflow-backend
+              mountPath: /mlflow
+      volumes:
+        - name: mlflow-backend
+          persistentVolumeClaim:
+            claimName: mlflow-pvc

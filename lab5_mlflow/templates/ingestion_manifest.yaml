@@ -1,0 +1,50 @@
+version: 1
+tenants:
+  - id: default
+    sources:
+      - name: toast_orders_bulk
+        description: Toast Orders Bulk with line items, payments, employees
+        snowflake_table: ORDERS_BULK
+        watermark_column: LAST_MODIFIED_AT
+        key_columns: [GUID]
+        relationships:
+          - type: PLACED_AT_RESTAURANT
+            from: Order
+            to: Restaurant
+            key: RESTAURANTGUID
+          - type: CREATED_BY_EMPLOYEE
+            from: Order
+            to: Employee
+            key: EMPLOYEEGUID
+          - type: IS_PART_OF_ORDER_HEADER
+            from: ProperHotelToastOrderLineItem
+            to: Order
+            key: ORDERGUID
+          - type: HAS_PAYMENT
+            from: Order
+            to: Payment
+            key: ORDERGUID
+        batch_size: 5000
+        constraints:
+          - "CREATE CONSTRAINT order_guid IF NOT EXISTS FOR (o:Order) REQUIRE o.guid IS UNIQUE"
+          - "CREATE CONSTRAINT employee_guid IF NOT EXISTS FOR (e:Employee) REQUIRE e.employeeGuid IS UNIQUE"
+          - "CREATE CONSTRAINT restaurant_guid IF NOT EXISTS FOR (r:Restaurant) REQUIRE r.restaurantGuid IS UNIQUE"
+          - "CREATE CONSTRAINT lineitem_guid IF NOT EXISTS FOR (li:ProperHotelToastOrderLineItem) REQUIRE li.guid IS UNIQUE"
+      - name: events_venues
+        description: Events and venues from OpenTable/other sources
+        snowflake_table: EVENTS_VENUES
+        watermark_column: LAST_MODIFIED_AT
+        key_columns: [EVENT_ID]
+        relationships:
+          - type: AT_VENUE
+            from: Event
+            to: Venue
+            key: VENUE_ID
+          - type: NEAR
+            from: Venue
+            to: Restaurant
+            key: RESTAURANT_ID
+        batch_size: 2000
+        constraints:
+          - "CREATE CONSTRAINT event_id IF NOT EXISTS FOR (e:Event) REQUIRE e.id IS UNIQUE"
+          - "CREATE CONSTRAINT venue_id IF NOT EXISTS FOR (v:Venue) REQUIRE v.id IS UNIQUE"
